@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.cache/
+_probe_cache/
+.env
+_preview_out.txt
+_merged_preview.txt
+_env_new.txt
+_fix_noqa.py
+.venv/
+dist/
+build/

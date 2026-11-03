@@ -1,0 +1,72 @@
+[project]
+name = "nonebot-plugin-game-event-due"
+version = "0.1.0"
+description = "二游活动日历：每天检查一次，仅在 24 小时内有活动要开始或要结束时推送（数据源：SRA 公共 API）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "nonebot-plugin-game-event-due contributors" }]
+keywords = ["nonebot", "nonebot2", "qqbot", "game", "calendar", "activity"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: Nonebot",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: OS Independent",
+  "License :: OSI Approved :: MIT License",
+]
+
+dependencies = [
+  "nonebot2>=2.2.1",
+  "httpx>=0.27",
+  "pydantic>=2.0,<3",
+]
+
+[project.optional-dependencies]
+# OneBot v11 是主要目标，QQ 官方 Bot 为可选
+onebot = ["nonebot-adapter-onebot>=2.4"]
+qq = ["nonebot-adapter-qq>=1.6.7"]
+# 每天 12:00 的定时检查需要
+scheduler = ["nonebot-plugin-apscheduler>=0.5"]
+# 缓存目录用 localstore 管理更规范；缺失时退化为包内 .cache
+localstore = ["nonebot-plugin-localstore>=0.7"]
+all = [
+  "nonebot-adapter-onebot>=2.4",
+  "nonebot-adapter-qq>=1.6.7",
+  "nonebot-plugin-apscheduler>=0.5",
+  "nonebot-plugin-localstore>=0.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/zlqd123/nonebot_plugin_game_event_due"
+Repository = "https://github.com/zlqd123/nonebot_plugin_game_event_due"
+Issues = "https://github.com/zlqd123/nonebot_plugin_game_event_due/issues"
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pdm.build]
+includes = ["nonebot_plugin_game_event_due"]
+
+[tool.nonebot]
+plugin = ["nonebot_plugin_game_event_due"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["F", "W", "E", "I", "UP", "ASYNC", "C4", "T20", "Q", "RUF"]
+ignore = [
+  "E402",   # 允许 conftest 里延迟导入
+  "RUF001", # 中文标点会被误判为歧义字符
+  "RUF002",
+  "RUF003",
+]
