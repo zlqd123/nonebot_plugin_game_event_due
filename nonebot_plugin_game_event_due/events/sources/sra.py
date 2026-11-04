@@ -8,8 +8,8 @@
 
 from __future__ import annotations
 
-from typing import Any
 from collections.abc import Sequence
+from typing import Any
 
 from .base import (
     Activity,
@@ -30,6 +30,29 @@ def _stale_note(age_seconds: float) -> str:
     if hours >= 1:
         return f"本地缓存 {hours:.1f} 小时前"
     return f"本地缓存 {max(1, int(age_seconds / 60))} 分钟前"
+
+
+def _pick_cover(data: dict[str, Any]) -> str:
+    """挑出该游戏可用于配图的地址。
+
+    优先用根级 ``cover``（版本主视觉）；没有时退而取活动里出现次数最多的
+    那张——SRA 的活动级 cover 大多是同一张图重复挂，出现最多的那张通常
+    就是版本主视觉。仍然没有就返回空串，调用方据此降级成纯文字。
+    """
+    root = str(data.get("cover") or "").strip()
+    if root:
+        return root
+
+    counts: dict[str, int] = {}
+    for item in data.get("activities") or []:
+        if not isinstance(item, dict):
+            continue
+        cover = str(item.get("cover") or "").strip()
+        if cover:
+            counts[cover] = counts.get(cover, 0) + 1
+    if not counts:
+        return ""
+    return max(counts, key=lambda url: (counts[url], url))
 
 
 #: SRA 公开 API 支持的 18 款游戏。``game_id`` 同时就是 URL 里的文件名，
@@ -151,6 +174,9 @@ class SraSource(ActivitySource):
         self._cache: dict[str, list[Activity]] = {}
         self.versions: dict[str, str] = {}
         self.notes: dict[str, str] = {}
+        # 游戏版本主视觉（JSON 根级 cover）。活动级 cover 基本都是复用这张图，
+        # 没有独立的每活动配图，所以只记游戏级这一张。
+        self.covers: dict[str, str] = {}
     def games(self) -> tuple[Game, ...]:
         return SRA_GAMES
 
@@ -182,6 +208,8 @@ class SraSource(ActivitySource):
                     raw = self._client.read_cache(cache_key)
                     cached = self._parse(raw, game_id) if raw is not None else []
                     self._cache[game_id] = cached
+                    # 只读缓存时也要把版本号与主视觉补上，否则推送会莫名少图
+                    self._record_meta(raw, game_id)
                 self.notes[game_id] = _stale_note(age)
                 return cached
 
@@ -194,6 +222,7 @@ class SraSource(ActivitySource):
                 raw = self._client.read_cache(cache_key)
                 cached = self._parse(raw, game_id) if raw is not None else []
                 self._cache[game_id] = cached
+                self._record_meta(raw, game_id)
             return cached
 
         activities = self._parse(result.data, game_id)
@@ -211,6 +240,13 @@ class SraSource(ActivitySource):
             self.versions[game_id] = (
                 f"{version} {version_name}".strip() if version_name else version
             )
+        cover = _pick_cover(data)
+        if cover:
+            self.covers[game_id] = cover
+
+    def game_cover(self, game_id: str) -> str:
+        """该游戏的版本主视觉地址；没有就是空串。"""
+        return self.covers.get(str(game_id or "").strip(), "")
 
     def _parse(self, data: Any, game_id: str) -> list[Activity]:
         if not isinstance(data, dict):

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -203,6 +203,10 @@ class MessageSettings:
     tier_summary: bool = False
     # 把最紧急的活动排在前面
     sort_by_urgency: bool = True
+    # 有版本主视觉时插入一张配图；没有就只发文字。关掉则永远纯文字。
+    insert_cover: bool = True
+    # 配图在消息里的宽度（仅 QQ 官方 markdown 使用，OneBot 忽略）
+    cover_width: int = 640
     # 游戏显示名覆盖：(代号/原名/内置别名 -> 想显示的名字)
     game_aliases: tuple[tuple[str, str], ...] = ()
 
@@ -510,11 +514,16 @@ def build_window_parts(
     plans: "Sequence[ReminderPlan]",
     now: datetime,
     settings: MessageSettings,
+    *,
+    cover: str = "",
 ) -> list[MessagePart]:
     """一个游戏在 24 小时窗口内的提醒，按「即将结束 / 即将开始」分组。
 
     只输出标题和时间——这是提醒唯一的信息量，前缀里的
     「剩余不足24小时」在分组标题里已经说过一次了。
+
+    ``cover`` 非空且开启 ``insert_cover`` 时，会在游戏标题下面插一张配图
+    （SRA 的版本主视觉）。没有图就是纯文字，不做任何占位。
     """
     ending: list[ReminderPlan] = []
     starting: list[ReminderPlan] = []
@@ -552,7 +561,17 @@ def build_window_parts(
     if not lines:
         return []
 
-    return _assemble_list(f"🎮 {display_game_name(game, settings)}", lines)
+    parts: list[MessagePart] = [
+        MessagePart(PART_TEXT, f"🎮 {display_game_name(game, settings)}")
+    ]
+    body = "\n".join(lines)
+    if settings.insert_cover and cover:
+        parts.append(MessagePart(PART_IMAGE, cover))
+        parts.append(MessagePart(PART_TEXT, body))
+        return parts
+    # 没有图就合成一段，输出与「纯文字」时代逐字节一致
+    parts[0] = MessagePart(PART_TEXT, f"{parts[0].value}\n{body}")
+    return parts
 
 
 def build_multi_game_reminder_parts(
@@ -561,14 +580,25 @@ def build_multi_game_reminder_parts(
     settings: MessageSettings,
     *,
     window_hours: int = 24,
+    covers: "Mapping[str, str] | None" = None,
 ) -> list[MessagePart]:
     """把一个会话本轮所有游戏的提醒合并成一条消息。
 
     多个游戏时用统一的顶层标题，每个游戏一个分组小节；只有一条消息，
     不会再出现「同一轮连发好几条」。
+
+    ``covers`` 是 ``game_id -> 版本主视觉地址``，有就给对应游戏插一张图，
+    没有就那个游戏走纯文字。
     """
+    cover_map = covers or {}
     blocks = [
-        build_window_parts(game, list(plans), now, settings)
+        build_window_parts(
+            game,
+            list(plans),
+            now,
+            settings,
+            cover=cover_map.get(game.game_id, ""),
+        )
         for game, plans in entries
         if plans
     ]

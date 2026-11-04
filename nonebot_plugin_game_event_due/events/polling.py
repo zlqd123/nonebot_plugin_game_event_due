@@ -382,11 +382,32 @@ class ActivityPollingService:
                 )
             return delivered
 
-        parts = build_multi_game_reminder_parts(pending, now, effective)
+        parts = build_multi_game_reminder_parts(
+            pending, now, effective, covers=self._covers_for(pending)
+        )
         ok = await self.delivery.push(session, parts)
         if not ok:
             return []
         return [plan for _, plans in pending for plan in plans]
+
+    def _covers_for(
+        self, pending: Sequence[tuple[Game, list[ReminderPlan]]]
+    ) -> dict[str, str]:
+        """本轮消息要用的配图：``game_id -> 版本主视觉``。
+
+        只有数据源能给出主视觉时才带图；给不出就返回空串，格式化层会走
+        纯文字。这样「有图插图，无图文字」不需要额外开关。
+        """
+        covers: dict[str, str] = {}
+        for game, _ in pending:
+            source = self.registry.source_for(game.game_id)
+            cover_of = getattr(source, "game_cover", None)
+            if not callable(cover_of):
+                continue
+            cover = str(cover_of(game.game_id) or "").strip()
+            if cover:
+                covers[game.game_id] = cover
+        return covers
 
     async def deliver_plans(
         self,

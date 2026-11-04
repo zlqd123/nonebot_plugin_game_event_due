@@ -105,7 +105,45 @@ plugins = ["nonebot_plugin_game_event_due"]
 | `activity_separator` | `━━━━…` | 活动之间的分隔线；想更紧凑可设为空 |
 | `urgency_marker` | `true` | 紧急度色块 |
 | `sort_by_urgency` | `true` | 同一分组内按时间由近到远排序 |
+| `insert_cover` | `true` | 有版本主视觉就配一张图，没有就纯文字 |
+| `cover_width` | `640` | 配图宽度（px），只在 QQ 官方 Bot 的 markdown 里生效 |
 | `game_aliases` | `""` | 自定义显示名，如 `sr=星铁,ak=舟游` |
+
+## 图文混排
+
+**有图插图，无图文字**——不需要额外开关，取决于数据源给不给得出图。
+
+配图来源是 SRA 游戏 JSON 的**根级 `cover`**（版本主视觉）。活动级的
+`cover` 绝大多数是同一张图重复挂（实测终末地 14 个活动里 9 个挂同一张），
+所以插件只按游戏取一张：根级有就用根级，没有就退而取活动里出现次数最多
+的那张，一张都没有就纯文字。
+
+两个平台的做法不一样，插件在投递层消化掉差异：
+
+| 平台 | 图片怎么发 |
+| --- | --- |
+| OneBot v11 | 图片以 `[CQ:image,file=<url>]` 内联，文字与图在同一条消息 |
+| QQ 官方 Bot | 先把图上传到素材库换成 `qqbot-media://…`，再用 markdown（`msg_type=2`）内联 |
+
+QQ 官方那条路要三步（`prepare` → `PUT` → `complete`），同一张图按内容
+md5 只上传一次，结果缓存在 `material_cache.json`。任何一步失败都**自动降级
+为纯文字**，图片退化成「封面：<链接>」——绝不因为配图挂了而丢掉整条推送。
+
+实际渲染（2026-11-04 真机数据）：
+
+```
+### 明日方舟：终末地
+
+![封面 #640px](qqbot-media://image/v1/...)
+
+**▎即将结束（6）**
+
+- 「丰碑留名·魇林」限时挑战　**11-05 04:00**
+- 「卡莉的芳菲童话」拍照活动　**11-05 04:00**
+...
+```
+
+想关掉图片：`GAME_EVENT_DUE_INSERT_COVER=false`。
 
 ## 预置订阅
 
@@ -167,12 +205,13 @@ GAME_EVENT_DUE_DAILY_PUSH__HOUR=12            # 每天 12:00 检查
 GAME_EVENT_DUE_DEADLINE_PUSH__THRESHOLDS=1    # 结束前 24 小时
 GAME_EVENT_DUE_QUIET_HOURS=23-8
 GAME_EVENT_DUE_ACTIVITY_SEPARATOR=
+GAME_EVENT_DUE_INSERT_COVER=true              # 有版本主视觉就配图
 GAME_EVENT_DUE_PRESET_SUBSCRIPTIONS=qq:group:<群openid>=方舟,终末地@1~1
 ```
 
 ## 已知限制
 
-- 只发文字，不发送任何图片（封面、立绘一律不取）
+- 配图只有**每个游戏一张版本主视觉**，没有活动级独立插画（数据源里就没有）
 - 卡池（`pools` 字段）暂不解析
 - 不支持多轮补充查询：一天只有一次检查，活动若在两次检查之间开始并结束，
   只能在下一次检查时补发（实际数据里活动时长都远超 24 小时，不会遇到）
@@ -181,13 +220,15 @@ GAME_EVENT_DUE_PRESET_SUBSCRIPTIONS=qq:group:<群openid>=方舟,终末地@1~1
 ## 开发
 
 ```bash
-python -m pytest -q      # 143 passed
+python -m pytest -q      # 174 passed
 python -m ruff check .
+python scripts/preview_rich.py   # 用真实 SRA 数据预览纯文本 / CQ 码 / markdown 三种形态
 ```
 
 目录：`events/polling.py`（调度与投递）、`events/services/reminder_service.py`
 （档位与去重）、`events/services/message_formatter.py`（消息格式）、
-`events/sources/sra.py`（数据源）、`platform/`（OneBot / QQ 适配）。
+`events/sources/sra.py`（数据源）、`platform/media.py`（QQ 素材上传）、
+`platform/push.py`（图文混排与降级）、`platform/capability.py`（平台能力）。
 
 ## 来源
 

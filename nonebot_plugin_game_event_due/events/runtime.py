@@ -12,6 +12,7 @@ from nonebot import logger
 
 from ..config import Config, DailyPushConfig, DeadlinePushConfig, StartPushConfig
 from ..core.storage import store
+from ..platform.media import MediaCache
 from .delivery import Delivery
 from .polling import ActivityPollingService, PollingSettings
 from .services.message_formatter import (
@@ -56,9 +57,11 @@ def resolve_cache_dir(config: Config) -> Path | None:
 def build_message_settings(config: Config) -> MessageSettings:
     """把配置翻译成消息格式设置。
 
-    输出只保留活动标题 + 时间：描述、标签、额外时间段、封面一律不开。
+    输出只保留活动标题 + 时间：描述、标签、额外时间段一律不开。
     ``show_deadline=True`` 是必须的——推送的唯一用途就是提醒「什么时候
     开始 / 什么时候结束」，没有时间这条消息就没信息量。
+    ``insert_cover`` 打开时，有版本主视觉的游戏会多一张配图，没有图的
+    游戏自动只剩文字。
     """
     return MessageSettings(
         include_description=False,
@@ -74,6 +77,8 @@ def build_message_settings(config: Config) -> MessageSettings:
         headline_remaining=False,
         tier_summary=False,
         sort_by_urgency=config.sort_by_urgency,
+        insert_cover=config.insert_cover,
+        cover_width=config.cover_width,
         game_aliases=normalize_game_aliases(config.game_aliases),
     )
 
@@ -120,7 +125,11 @@ class EventsRuntime:
         self.registry = GameRegistry([self.source])
 
         self.subscriptions = SubscriptionService(store.get, store.put)
-        self.delivery = Delivery(self.message_settings)
+        # QQ 官方 Bot 的图片素材缓存跟其它缓存放一起，重启后不必重新上传
+        media_cache = MediaCache(
+            (cache_dir / "material_cache.json") if cache_dir else None
+        )
+        self.delivery = Delivery(self.message_settings, media_cache)
         self.polling = ActivityPollingService(
             self.registry,
             self.subscriptions,

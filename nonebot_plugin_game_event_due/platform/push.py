@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import importlib
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from nonebot import logger
@@ -22,6 +24,18 @@ from nonebot import logger
 from .capability import Platform, capability_of, detect_platform
 from .sender import plan_chunks
 from .session import SessionKey, parse_session_key
+
+
+@dataclass(frozen=True, slots=True)
+class _Chunk:
+    """渲染用的最小单元：一段文字或一张图的地址。
+
+    只依赖 ``is_image`` / ``value`` 两个属性，所以可以直接吃
+    ``message_formatter.MessagePart``；platform 层不必反向导入 events 层。
+    """
+
+    is_image: bool
+    value: str
 
 
 def _wrap_text(bot: Any, text: str) -> Any:
@@ -123,6 +137,179 @@ def _as_int(value: str) -> int | str:
         return int(value)
     except (TypeError, ValueError):
         return value
+
+
+# ---- 图文混排 ----
+
+
+def _cq_image(url: str) -> str:
+    """OneBot v11 的图片 CQ 码。"""
+    safe = url.replace("&", "&amp;").replace("[", "&#91;").replace("]", "&#93;")
+    return f"[CQ:image,file={safe}]"
+
+
+def parts_to_markdown(parts: Sequence[Any], width: int = 640) -> str:
+    """把消息片段渲染成 QQ 官方 Bot 的 markdown。
+
+    图片按行内图片写；标题与列表行沿用已上线验证过的排版（``###`` / ``**`` /
+    ``-``），因为 QQ 的 markdown 渲染器对裸文本换行不敏感，必须用列表项才能
+    保证一项一行。认不出的行原样输出，不做猜测。
+    """
+    lines: list[str] = []
+    for part in parts:
+        if part.is_image:
+            lines.append(f"![封面 #{width}px]({part.value})")
+            lines.append("")
+            continue
+        for raw in part.value.split("\n"):
+            line = raw.rstrip()
+            if not line:
+                lines.append("")
+            elif line.startswith("🎮 "):
+                lines.append(f"### {line[2:]}")
+                lines.append("")
+            elif line.startswith("⏰ "):
+                lines.append(f"## {line}")
+                lines.append("")
+            elif line.startswith("▎"):
+                # 列表项后面紧跟一行加粗文字，会被 markdown 吞进上一个列表项，
+                # 所以这类小标题前必须先空一行
+                if lines and lines[-1].startswith("- "):
+                    lines.append("")
+                lines.append(f"**{line}**")
+                lines.append("")
+            elif line.startswith("· "):
+                body = line[2:]
+                title, _, stamp = body.rpartition("　")
+                lines.append(f"- {title}　**{stamp}**" if stamp else f"- {body}")
+            else:
+                lines.append(line)
+    # 压掉连续空行，QQ 对多余空行的处理不稳定
+    out: list[str] = []
+    for line in lines:
+        if not line and out and not out[-1]:
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def parts_to_plain(parts: Sequence[Any]) -> str:
+    """纯文本降级：图片退化成可点的链接，不丢信息。"""
+    chunks: list[str] = []
+    for part in parts:
+        if part.is_image:
+            chunks.append(f"封面：{part.value}")
+        elif part.value:
+            chunks.append(part.value)
+    return "\n".join(chunks).strip()
+
+
+def parts_to_onebot(parts: Sequence[Any]) -> str:
+    """OneBot v11：图片以 CQ 码内联，图片前后各留一个换行。"""
+    out: list[str] = []
+    for part in parts:
+        if part.is_image:
+            if out and not out[-1].endswith("\n"):
+                out.append("\n")
+            out.append(_cq_image(part.value))
+            out.append("\n")
+        else:
+            out.append(part.value)
+    return "".join(out).strip()
+
+
+async def send_parts(
+    bot: Any,
+    session: SessionKey,
+    parts: Sequence[Any],
+    *,
+    cover_width: int = 640,
+    media: Any = None,
+) -> bool:
+    """发一条可能带图的消息。
+
+    没有图片片段时就是普通文本发送。有图片时按平台走各自的路径：
+
+    * OneBot：图片以 CQ 码内联，和文字同一条消息；
+    * QQ 官方：图片先上传素材库换成 ``qqbot-media://`` 地址，再用 markdown
+      发送（``msg_type=2``）。频道等不保证支持 markdown 的场景退回纯文本。
+
+    任何一步不成立都退回纯文本，绝不让配图问题导致整条推送丢失。
+    """
+    if not parts:
+        return True
+
+    if not any(part.is_image for part in parts):
+        return await send_to_session(bot, session, parts_to_plain(parts))
+
+    platform = detect_platform(bot)
+    capability = capability_of(bot, scope=session.scope)
+    plain = parts_to_plain(parts)
+
+    if platform is Platform.ONEBOT:
+        rendered = parts_to_onebot(parts)
+        if len(rendered) > capability.message_limit:
+            return await send_to_session(bot, session, plain)
+        return await send_chunk(bot, session, rendered)
+
+    if platform is Platform.QQ and session.scope in ("group", "private"):
+        if media is None:
+            return await send_to_session(bot, session, plain)
+        uploaded: dict[str, str] = {}
+        resolved: list[_Chunk] = []
+        for part in parts:
+            if part.is_image:
+                url = uploaded.get(part.value)
+                if url is None:
+                    url = await media.upload_image(bot, part.value)
+                    uploaded[part.value] = url
+                if not url:
+                    # 传不上去就当这张图不存在，文字照发
+                    continue
+                resolved.append(_Chunk(True, url))
+            else:
+                resolved.append(_Chunk(False, part.value))
+        markdown = parts_to_markdown(resolved, cover_width)
+        if markdown and len(markdown) <= capability.message_limit:
+            if await _send_markdown(bot, session, markdown):
+                return True
+        return await send_to_session(bot, session, plain)
+
+    return await send_to_session(bot, session, plain)
+
+
+async def _send_markdown(bot: Any, session: SessionKey, markdown: str) -> bool:
+    """用 markdown（``msg_type=2``）发送。适配器不支持时返回 False。"""
+    module = _adapter_message_module(bot)
+    segment = getattr(module, "MessageSegment", None) if module else None
+    if segment is None or not hasattr(segment, "markdown"):
+        return False
+    try:
+        message = segment.markdown(markdown)
+    except Exception:  # 构造失败就直接降级
+        return False
+
+    if session.scope == "group":
+        return await _call(
+            bot, "send_to_group", group_openid=session.target_id, message=message
+        )
+    if session.scope == "private":
+        return await _call(
+            bot, "send_to_c2c", openid=session.target_id, message=message
+        )
+    return False
+
+
+def _adapter_message_module(bot: Any) -> Any:
+    """拿到当前适配器的 ``message`` 模块；取不到返回 ``None``。"""
+    try:
+        adapter_module = type(bot).__module__.rsplit(".", 1)[0]
+        module = sys.modules.get(f"{adapter_module}.message")
+        if module is None:
+            module = importlib.import_module(f"{adapter_module}.message")
+        return module
+    except Exception:  # 取不到就不发 markdown
+        return None
 
 
 async def push_text(bot: Any, target: str, text: str) -> bool:
