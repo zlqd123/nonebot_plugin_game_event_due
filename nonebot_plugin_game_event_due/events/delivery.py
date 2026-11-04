@@ -29,7 +29,6 @@ from ..platform import (
     send_parts,
     send_to_session,
 )
-from ..platform.media import MediaCache
 from .services.message_formatter import MessagePart, MessageSettings, parts_to_text
 
 
@@ -49,14 +48,8 @@ def resolve_bot(platform: Platform) -> Bot | None:
 class Delivery:
     """把消息送到目标会话。"""
 
-    def __init__(
-        self,
-        settings: MessageSettings,
-        media_cache: MediaCache | None = None,
-    ) -> None:
+    def __init__(self, settings: MessageSettings) -> None:
         self.settings = settings
-        #: QQ 官方 Bot 的图片素材缓存；没配置就只用内存
-        self.media = media_cache or MediaCache()
 
     # ---- 回复当前事件 ----
 
@@ -101,13 +94,7 @@ class Delivery:
             logger.warning(f"没有可用的 {session.platform.value} Bot，无法推送到 {session}")
             return False
 
-        return await send_parts(
-            bot,
-            session,
-            parts,
-            cover_width=self.settings.cover_width,
-            media=self.media,
-        )
+        return await send_parts(bot, session, parts)
 
     async def push_text(self, session: SessionKey, text: str) -> bool:
         """推一段纯文本（用于错误提示）。"""

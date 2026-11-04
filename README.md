@@ -106,44 +106,66 @@ plugins = ["nonebot_plugin_game_event_due"]
 | `urgency_marker` | `true` | 紧急度色块 |
 | `sort_by_urgency` | `true` | 同一分组内按时间由近到远排序 |
 | `insert_cover` | `true` | 有版本主视觉就配一张图，没有就纯文字 |
-| `cover_width` | `640` | 配图宽度（px），只在 QQ 官方 Bot 的 markdown 里生效 |
 | `game_aliases` | `""` | 自定义显示名，如 `sr=星铁,ak=舟游` |
 
 ## 图文混排
 
 **有图插图，无图文字**——不需要额外开关，取决于数据源给不给得出图。
+24 小时提醒和每日全量摘要都带图。
 
 配图来源是 SRA 游戏 JSON 的**根级 `cover`**（版本主视觉）。活动级的
 `cover` 绝大多数是同一张图重复挂（实测终末地 14 个活动里 9 个挂同一张），
 所以插件只按游戏取一张：根级有就用根级，没有就退而取活动里出现次数最多
 的那张，一张都没有就纯文字。
 
-两个平台的做法不一样，插件在投递层消化掉差异：
+### 两个平台的能力差得很远
 
-| 平台 | 图片怎么发 |
-| --- | --- |
-| OneBot v11 | 图片以 `[CQ:image,file=<url>]` 内联，文字与图在同一条消息 |
-| QQ 官方 Bot | 先把图上传到素材库换成 `qqbot-media://…`，再用 markdown（`msg_type=2`）内联 |
+| 平台 | 怎么发图 | 结果 |
+| --- | --- | --- |
+| OneBot v11 | `[CQ:image,file=<url>]` 内联 | 一条消息里真·图文混排，多游戏也只要一条 |
+| QQ 官方 Bot | `msg_type=7` 富媒体 | **一条消息只能带一张图**，多游戏按游戏拆成多条 |
 
-QQ 官方那条路要三步（`prepare` → `PUT` → `complete`），同一张图按内容
-md5 只上传一次，结果缓存在 `material_cache.json`。任何一步失败都**自动降级
-为纯文字**，图片退化成「封面：<链接>」——绝不因为配图挂了而丢掉整条推送。
+QQ 官方这边踩过的坑，记下来免得以后又试一遍：
+
+- markdown（`msg_type=2`）里写 `![alt](url)` **不渲染图片**，实测连外链也不行，
+  客户端只会把方括号里的文字当链接显示出来；
+- `msg_type=8` 图文卡片（`card.tuwen`）在这个 Bot 上返回
+  `404 不支持的调用`（`40011002`）；
+- 所以只剩 `msg_type=7`，适配器的 `MessageSegment.file_image()` 会自己完成
+  `post_group_upload` 换 `file_info` 再发，不需要手动调上传接口。
+
+因此 QQ 群的实际效果是**一个游戏一条消息**：一张版本主视觉 + 该游戏的
+「即将结束 / 即将开始」清单。两个游戏就是两条，内容各自完整，不重复不刷屏。
 
 实际渲染（2026-11-04 真机数据）：
 
 ```
-### 明日方舟：终末地
+[消息 1] 图片：终末地版本主视觉
+         文字：🎮 明日方舟：终末地
+               ▎即将结束（6）
+               · 「丰碑留名·魇林」限时挑战　11-05 04:00
+               · 「卡莉的芳菲童话」拍照活动　11-05 04:00
+               ...
+               ▎即将开始（4）
+               · 「归野」叙事活动　11-05 12:00~11-26 05:59
+               ...
 
-![封面 #640px](qqbot-media://image/v1/...)
-
-**▎即将结束（6）**
-
-- 「丰碑留名·魇林」限时挑战　**11-05 04:00**
-- 「卡莉的芳菲童话」拍照活动　**11-05 04:00**
-...
+[消息 2] 图片：方舟版本主视觉
+         文字：🎮 明日方舟
+               ...
 ```
 
-想关掉图片：`GAME_EVENT_DUE_INSERT_COVER=false`。
+### 降级
+
+任何一步失败都退回纯文字，图片变成可点的「封面：<链接>」，正文照发：
+
+- 图片下载失败 / 超过 8MB / 非图片 → 该条只发文字；
+- 适配器没有 `file_image`（比如频道）→ 只发文字；
+- 发送富媒体失败 → 该条改用纯文本重发。
+
+绝不因为配图挂了而丢掉整条推送。
+
+想彻底关掉图片：`GAME_EVENT_DUE_INSERT_COVER=false`。
 
 ## 预置订阅
 
@@ -220,14 +242,14 @@ GAME_EVENT_DUE_PRESET_SUBSCRIPTIONS=qq:group:<群openid>=方舟,终末地@1~1
 ## 开发
 
 ```bash
-python -m pytest -q      # 174 passed
+python -m pytest -q      # 172 passed
 python -m ruff check .
-python scripts/preview_rich.py   # 用真实 SRA 数据预览纯文本 / CQ 码 / markdown 三种形态
+python scripts/preview_rich.py   # 用真实 SRA 数据预览纯文本 / CQ 码 / 按游戏拆条 三种形态
 ```
 
 目录：`events/polling.py`（调度与投递）、`events/services/reminder_service.py`
 （档位与去重）、`events/services/message_formatter.py`（消息格式）、
-`events/sources/sra.py`（数据源）、`platform/media.py`（QQ 素材上传）、
+`events/sources/sra.py`（数据源）、`platform/media.py`（下载封面字节）、
 `platform/push.py`（图文混排与降级）、`platform/capability.py`（平台能力）。
 
 ## 来源

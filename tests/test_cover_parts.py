@@ -9,13 +9,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from nonebot_plugin_game_event_due.events.services.message_formatter import (
     PART_IMAGE,
     PART_TEXT,
     MessageSettings,
     build_multi_game_reminder_parts,
+    build_overview_parts,
     build_window_parts,
     parts_to_text,
 )
@@ -136,3 +135,49 @@ def test_single_game_collapses_to_one_block():
     )
     # 只有一个游戏时不加顶层日期标题
     assert parts[0].value == "🎮 明日方舟：终末地"
+
+
+# ---- 每日全量摘要 ----
+
+
+def make_activity(name: str, *, days_left: float = 10) -> Activity:
+    return Activity(
+        game_id="end",
+        activity_id=name,
+        name=name,
+        start_time=NOW - timedelta(days=3),
+        end_time=NOW + timedelta(days=days_left),
+    )
+
+
+def test_overview_gets_cover_between_header_and_list():
+    parts = build_overview_parts(
+        GAME,
+        [make_activity("甲"), make_activity("乙", days_left=20)],
+        NOW,
+        MessageSettings(show_deadline=True),
+        source_name="SRA 公共 API",
+        cover=COVER,
+    )
+    assert [part.kind for part in parts] == [PART_TEXT, PART_IMAGE, PART_TEXT]
+    assert parts[0].value == "🎮 明日方舟：终末地"
+    assert parts[1].value == COVER
+    assert "▎进行中（2）" in parts[2].value
+    assert "数据来源：SRA 公共 API" in parts[2].value
+
+
+def test_overview_without_cover_is_unchanged():
+    with_blank = build_overview_parts(
+        GAME, [make_activity("甲")], NOW, MessageSettings(), cover=""
+    )
+    without = build_overview_parts(GAME, [make_activity("甲")], NOW, MessageSettings())
+    assert with_blank == without
+    assert [part.kind for part in with_blank] == [PART_TEXT]
+
+
+def test_overview_cover_can_be_switched_off():
+    settings = MessageSettings(insert_cover=False)
+    parts = build_overview_parts(
+        GAME, [make_activity("甲")], NOW, settings, cover=COVER
+    )
+    assert [part.kind for part in parts] == [PART_TEXT]

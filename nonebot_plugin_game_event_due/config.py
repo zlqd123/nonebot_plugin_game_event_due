@@ -133,9 +133,6 @@ class Config(BaseModel):
     #: 有版本主视觉时，在游戏标题下插一张配图；没有图就只发文字。
     #: 关掉则永远纯文字（某些适配器或群里图片不显示时可以用它关掉）。
     insert_cover: bool = True
-    #: 配图宽度（像素）。只在 QQ 官方 Bot 的 markdown 里生效，OneBot 忽略。
-    #: 手机上 640 大约占满宽度，嫌大可以改小。
-    cover_width: int = Field(default=640, ge=120, le=2000)
     #: 自定义游戏显示名，形如 ``sr=星铁``，换行或逗号分隔
     game_aliases: str = ""
 

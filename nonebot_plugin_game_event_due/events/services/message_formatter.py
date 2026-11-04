@@ -205,8 +205,6 @@ class MessageSettings:
     sort_by_urgency: bool = True
     # 有版本主视觉时插入一张配图；没有就只发文字。关掉则永远纯文字。
     insert_cover: bool = True
-    # 配图在消息里的宽度（仅 QQ 官方 markdown 使用，OneBot 忽略）
-    cover_width: int = 640
     # 游戏显示名覆盖：(代号/原名/内置别名 -> 想显示的名字)
     game_aliases: tuple[tuple[str, str], ...] = ()
 
@@ -638,10 +636,13 @@ def build_overview_parts(
     *,
     source_name: str = "",
     note: str = "",
+    cover: str = "",
 ) -> list[MessagePart]:
     """构建「当前活动一览」，用于手动查询、订阅确认与每日推送。
 
     只输出活动标题，进行中与即将开始各成一段，超出上限时补一行省略说明。
+    ``cover`` 非空且开启 ``insert_cover`` 时，在游戏标题后插一张版本主视觉；
+    没有图就只发文字，和 24 小时提醒的规则完全一致。
     """
     active = sorted(
         (item for item in activities if item.is_active(now)),
@@ -685,6 +686,17 @@ def build_overview_parts(
         footer_parts.append(f"数据来源：{source_name}")
     footer = "　".join(footer_parts)
 
+    body = [line for line in lines if line]
+    if footer:
+        body.append(footer)
+    body_text = "\n".join(body)
+
+    if settings.insert_cover and cover:
+        return [
+            MessagePart(PART_TEXT, header),
+            MessagePart(PART_IMAGE, cover),
+            *([MessagePart(PART_TEXT, body_text)] if body_text else []),
+        ]
     return _assemble_list(header, lines, footer=footer)
 
 

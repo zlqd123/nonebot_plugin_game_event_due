@@ -12,7 +12,6 @@ from nonebot import logger
 
 from ..config import Config, DailyPushConfig, DeadlinePushConfig, StartPushConfig
 from ..core.storage import store
-from ..platform.media import MediaCache
 from .delivery import Delivery
 from .polling import ActivityPollingService, PollingSettings
 from .services.message_formatter import (
@@ -78,7 +77,6 @@ def build_message_settings(config: Config) -> MessageSettings:
         tier_summary=False,
         sort_by_urgency=config.sort_by_urgency,
         insert_cover=config.insert_cover,
-        cover_width=config.cover_width,
         game_aliases=normalize_game_aliases(config.game_aliases),
     )
 
@@ -125,11 +123,7 @@ class EventsRuntime:
         self.registry = GameRegistry([self.source])
 
         self.subscriptions = SubscriptionService(store.get, store.put)
-        # QQ 官方 Bot 的图片素材缓存跟其它缓存放一起，重启后不必重新上传
-        media_cache = MediaCache(
-            (cache_dir / "material_cache.json") if cache_dir else None
-        )
-        self.delivery = Delivery(self.message_settings, media_cache)
+        self.delivery = Delivery(self.message_settings)
         self.polling = ActivityPollingService(
             self.registry,
             self.subscriptions,

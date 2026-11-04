@@ -390,21 +390,24 @@ class ActivityPollingService:
             return []
         return [plan for _, plans in pending for plan in plans]
 
+    def cover_for(self, game_id: str) -> str:
+        """该游戏的版本主视觉地址；数据源给不出来就是空串。
+
+        「有图插图，无图文字」全靠这一个返回值决定，不需要额外开关。
+        """
+        source = self.registry.source_for(game_id)
+        cover_of = getattr(source, "game_cover", None)
+        if not callable(cover_of):
+            return ""
+        return str(cover_of(game_id) or "").strip()
+
     def _covers_for(
         self, pending: Sequence[tuple[Game, list[ReminderPlan]]]
     ) -> dict[str, str]:
-        """本轮消息要用的配图：``game_id -> 版本主视觉``。
-
-        只有数据源能给出主视觉时才带图；给不出就返回空串，格式化层会走
-        纯文字。这样「有图插图，无图文字」不需要额外开关。
-        """
+        """本轮消息要用的配图：``game_id -> 版本主视觉``，没有图的不进表。"""
         covers: dict[str, str] = {}
         for game, _ in pending:
-            source = self.registry.source_for(game.game_id)
-            cover_of = getattr(source, "game_cover", None)
-            if not callable(cover_of):
-                continue
-            cover = str(cover_of(game.game_id) or "").strip()
+            cover = self.cover_for(game.game_id)
             if cover:
                 covers[game.game_id] = cover
         return covers
@@ -542,6 +545,7 @@ class ActivityPollingService:
                         now,
                         settings,
                         source_name=self.registry.source_name(game_id),
+                        cover=self.cover_for(game_id),
                     )
                 )
 
@@ -616,6 +620,7 @@ class ActivityPollingService:
                 now,
                 settings,
                 source_name=self.registry.source_name(game.game_id),
+                cover=self.cover_for(game.game_id),
             )
             if await self.delivery.push(session_key, parts):
                 sent += 1
