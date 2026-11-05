@@ -122,6 +122,11 @@ class Config(BaseModel):
     quiet_hours: str = "23-8"
 
     # ---- 消息格式 ----
+    #: 窗口宽度（小时）。检查点前后各取这么长，默认 24 小时。
+    window_hours: int = Field(default=24, ge=1, le=168)
+    #: 检查点秒数。固定为 1（12:00:01）以消掉整点时间戳的归属歧义：
+    #: 12:00:00 开始的活动归「已开始」，12:00:00 结束的归「已结束」。
+    check_second: int = Field(default=1, ge=0, le=59)
     #: 活动之间的分隔线
     activity_separator: str = "━━━━━━━━━━━━"
     #: 剩余时间色块标记（仅提醒推送，查询列表不带）

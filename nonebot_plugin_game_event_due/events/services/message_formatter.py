@@ -21,6 +21,7 @@ from .reminder_service import (
     reason_label,
     tier_kind,
 )
+from .window_service import WINDOW_GROUPS, WindowItem, WindowSnapshot
 
 MAX_ACTIVE_IN_OVERVIEW = 15
 MAX_UPCOMING_IN_OVERVIEW = 8
@@ -509,7 +510,7 @@ def _window_line(
 
 def build_window_parts(
     game: Game,
-    plans: "Sequence[ReminderPlan]",
+    plans: Sequence[ReminderPlan],
     now: datetime,
     settings: MessageSettings,
     *,
@@ -572,13 +573,98 @@ def build_window_parts(
     return parts
 
 
+def _snapshot_line(item: WindowItem, now: datetime) -> str:
+    """一行「标题 + 时间」：开始组写完整时段，结束组只写结束时刻。"""
+    activity = item.activity
+    stamp = format_moment(item.moment, now)
+    if item.show_range and activity.end_time is not None:
+        stamp = f"{stamp}~{format_moment(activity.end_time, now)}"
+    return f"· {activity.name}　{stamp}"
+
+
+def build_snapshot_parts(
+    game: Game,
+    snapshot: WindowSnapshot,
+    settings: MessageSettings,
+    *,
+    cover: str = "",
+) -> list[MessagePart]:
+    """把一个游戏的 24 小时窗口快照渲染成消息片段。
+
+    四组按固定顺序输出，空组不显示；每行只到时间，不写方向动词。
+    ``cover`` 非空且开启 ``insert_cover`` 时插一张版本主视觉，没有图就
+    合成一段纯文字（与旧的纯文字形态逐字节一致）。
+    """
+    lines: list[str] = []
+    for group in WINDOW_GROUPS:
+        items = snapshot.groups.get(group) or ()
+        if not items:
+            continue
+        if lines:
+            lines.append("")
+        lines.append(f"▎{group}（{len(items)}）")
+        lines.extend(_snapshot_line(item, snapshot.check_at) for item in items)
+
+    if not lines:
+        return []
+
+    header = f"🎮 {display_game_name(game, settings)}"
+    body = "\n".join(lines)
+    if settings.insert_cover and cover:
+        return [
+            MessagePart(PART_TEXT, header),
+            MessagePart(PART_IMAGE, cover),
+            MessagePart(PART_TEXT, body),
+        ]
+    return [MessagePart(PART_TEXT, f"{header}\n{body}")]
+
+
+def build_multi_game_snapshot_parts(
+    entries: Sequence[tuple[Game, WindowSnapshot]],
+    settings: MessageSettings,
+    *,
+    covers: Mapping[str, str] | None = None,
+) -> list[MessagePart]:
+    """把一个会话本轮所有游戏的快照合并成一条消息。
+
+    只有一个游戏时不套顶层日期标题；多个游戏用统一的 ``📅 MM-DD`` 开头，
+    每个游戏一个 ``🎮`` 小节。
+    """
+    cover_map = covers or {}
+    blocks = [
+        build_snapshot_parts(
+            game, snapshot, settings, cover=cover_map.get(game.game_id, "")
+        )
+        for game, snapshot in entries
+        if not snapshot.is_empty()
+    ]
+    blocks = [block for block in blocks if block]
+    if not blocks:
+        return []
+    if len(blocks) == 1:
+        return blocks[0]
+
+    first_check = next(
+        (snapshot.check_at for _, snapshot in entries if not snapshot.is_empty()),
+        None,
+    )
+    header = (
+        f"📅 活动窗口 · {first_check:%m-%d}" if first_check is not None else "📅 活动窗口"
+    )
+    parts: list[MessagePart] = [MessagePart(PART_TEXT, header)]
+    for block in blocks:
+        parts.append(MessagePart(PART_TEXT, ""))
+        parts.extend(block)
+    return parts
+
+
 def build_multi_game_reminder_parts(
-    entries: "Sequence[tuple[Game, Sequence[ReminderPlan]]]",
+    entries: Sequence[tuple[Game, Sequence[ReminderPlan]]],
     now: datetime,
     settings: MessageSettings,
     *,
     window_hours: int = 24,
-    covers: "Mapping[str, str] | None" = None,
+    covers: Mapping[str, str] | None = None,
 ) -> list[MessagePart]:
     """把一个会话本轮所有游戏的提醒合并成一条消息。
 

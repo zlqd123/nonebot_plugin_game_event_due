@@ -13,10 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from collections.abc import Sequence
 
 from nonebot import logger
 
@@ -26,15 +26,14 @@ from .services.message_formatter import (
     MessagePart,
     MessageSettings,
     build_multi_game_reminder_parts,
+    build_multi_game_snapshot_parts,
     build_overview_parts,
     build_reminder_parts,
     build_single_reminder_parts,
 )
 from .services.reminder_service import (
-    ActivityNotifyState,
     ReminderPlan,
     ReminderPolicy,
-    apply_plan,
     collect_plans,
     matches_filters,
 )
@@ -43,7 +42,12 @@ from .services.subscription_service import (
     resolve_message_settings,
     resolve_policy,
 )
-from .sources.base import Activity, GAME_TIMEZONE, Game, filter_relevant
+from .services.window_service import (
+    WindowSnapshot,
+    classify_window,
+    normalize_check_time,
+)
+from .sources.base import GAME_TIMEZONE, Activity, Game, filter_relevant
 from .sources.registry import GameRegistry
 
 
@@ -75,6 +79,15 @@ def in_quiet_hours(moment: datetime, spec: str) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class DailyCheckSettings:
+    """窗口快照的检查点。秒固定为 1，把整点时间戳明确推到「过去」侧。"""
+
+    hour: int = 12
+    minute: int = 0
+    second: int = 1
+
+
+@dataclass(frozen=True, slots=True)
 class PollingSettings:
     """轮询与推送的运行时设置。"""
 
@@ -87,6 +100,10 @@ class PollingSettings:
     retention_days: int = 30
     #: 静默时段，如 ``23-8``；留空表示全天可推送
     quiet_hours: str = ""
+    #: 窗口宽度（小时），前后各取这么长
+    window_hours: int = 24
+    #: 每天的检查点
+    daily_check: DailyCheckSettings = field(default_factory=DailyCheckSettings)
 
     @property
     def fetch_interval_seconds(self) -> float:
@@ -233,9 +250,25 @@ class ActivityPollingService:
             return await self._run_cycle_locked(force=force)
 
     async def _run_cycle_locked(self, *, force: bool = False) -> CycleReport:
+        """一天一轮的 24 小时窗口快照。
+
+        不再走档位状态机：检查点钉死在 12:00:01，把每个游戏的活动按
+        「已开始 / 即将开始 / 即将结束 / 已结束」四组切分，一个会话合并成
+        一条消息。窗口随日期移动，天然不需要「一个活动只播一次」的去重；
+        仍用每日推送日期保证「每群每天最多一条」。
+        """
         report = CycleReport(started_at=datetime.now(GAME_TIMEZONE))
-        now = report.started_at
-        assert now is not None
+        real_now = report.started_at
+        assert real_now is not None
+
+        daily = self.settings.daily_check
+        now = normalize_check_time(
+            real_now,
+            hour=daily.hour,
+            minute=daily.minute,
+            second=daily.second,
+        )
+        today = now.strftime("%Y-%m-%d")
 
         sessions = await self.subscriptions.get_all()
         active_sessions = {
@@ -264,7 +297,7 @@ class ActivityPollingService:
                 fetched[game_id] = await self.fetch_activities(game_id, force=force)
                 report.fetched_games += 1
                 report.activities += len(fetched[game_id])
-            except Exception as exc:  # noqa: BLE001 - 单个游戏失败不影响其它
+            except Exception as exc:
                 detail = f"{type(exc).__name__}: {exc}"
                 report.failures[game_id] = detail
                 logger.warning(f"获取 {known_games[game_id].name} 活动数据失败: {detail}")
@@ -275,76 +308,70 @@ class ActivityPollingService:
             self.last_report = report
             return report
 
-        notify_state = await self.subscriptions.get_notify_state()
-        dirty = False
+        if in_quiet_hours(real_now, self.settings.quiet_hours):
+            logger.info("静默时段跳过窗口快照推送")
+            report.finished_at = datetime.now(GAME_TIMEZONE)
+            self.last_report = report
+            return report
+
+        pushed_dates = await self.subscriptions.get_daily_state()
 
         for umo, session in active_sessions.items():
-            policy = resolve_policy(session, self.default_policy)
-            if not policy.enabled:
+            if pushed_dates.get(umo) == today:
+                logger.debug(f"窗口快照跳过 {umo}: 今天已推送")
                 continue
-            settings = resolve_message_settings(session, self.message_settings)
-            bucket = notify_state.setdefault(umo, {})
+            if parse_session_key(umo) is None:
+                logger.warning(f"无法解析会话标识，跳过推送: {umo}")
+                continue
 
-            # 先把该会话本轮所有游戏的命中收集起来，合成一条消息再发
-            pending: list[tuple[Game, list[ReminderPlan]]] = []
+            settings = resolve_message_settings(session, self.message_settings)
+            pending: list[tuple[Game, WindowSnapshot]] = []
             for game_id in session["games"]:
                 activities = fetched.get(game_id)
                 game = known_games.get(game_id)
                 if activities is None or game is None:
                     continue
-
-                plans = self.plan_for_session(
-                    activities,
+                candidates = [
+                    activity
+                    for activity in activities
+                    if matches_filters(
+                        activity,
+                        whitelist=session.get("whitelist") or (),
+                        blacklist=session.get("blacklist") or (),
+                    )
+                ]
+                snapshot = classify_window(
+                    candidates,
                     now,
-                    bucket,
-                    policy,
-                    whitelist=session.get("whitelist") or (),
-                    blacklist=session.get("blacklist") or (),
+                    window_hours=self.settings.window_hours,
                 )
-                if plans:
-                    pending.append((game, plans))
+                if not snapshot.is_empty():
+                    pending.append((game, snapshot))
 
             if not pending:
                 continue
 
-            if in_quiet_hours(now, self.settings.quiet_hours):
-                deferred = sum(len(plans) for _, plans in pending)
-                logger.info(
-                    f"静默时段跳过推送 {umo}: {deferred} 条提醒推迟到时段结束后"
-                )
+            parts = build_multi_game_snapshot_parts(
+                pending, settings, covers=self._covers_for_snapshot(pending)
+            )
+            if not parts:
                 continue
 
-            delivered = await self.deliver_session_plans(
-                umo, pending, now, settings
-            )
-            if delivered:
-                report.messages += 1
-                report.reminders += len(delivered)
-            for plan in delivered:
-                state = ActivityNotifyState.from_dict(bucket.get(plan.activity.uid))
-                apply_plan(state, plan)
-                self.subscriptions.record_plan(
-                    notify_state,
-                    umo,
-                    plan.activity,
-                    state,
-                )
-                dirty = True
+            session_key = parse_session_key(umo)
+            assert session_key is not None
+            if not await self.delivery.push(session_key, parts):
+                continue
 
-        report.pruned = self.subscriptions.prune_notify_state(
-            notify_state,
-            now,
-            self.settings.retention_days,
-        )
-        if dirty or report.pruned:
-            await self.subscriptions.save_notify_state(notify_state)
+            report.messages += 1
+            report.reminders += sum(snapshot.total for _, snapshot in pending)
+            await self.subscriptions.mark_daily_pushed(umo, today)
 
         report.finished_at = datetime.now(GAME_TIMEZONE)
         self.last_report = report
         if report.reminders:
             logger.info(
-                f"活动提醒已推送: 会话 {report.sessions} 个, "
-                f"提醒 {report.reminders} 条"
+                f"窗口快照已推送: 会话 {report.sessions} 个, "
+                f"活动 {report.reminders} 条"
             )
         if report.failures:
             logger.warning(f"本轮数据源异常: {report.failures}")
@@ -405,6 +432,17 @@ class ActivityPollingService:
         self, pending: Sequence[tuple[Game, list[ReminderPlan]]]
     ) -> dict[str, str]:
         """本轮消息要用的配图：``game_id -> 版本主视觉``，没有图的不进表。"""
+        covers: dict[str, str] = {}
+        for game, _ in pending:
+            cover = self.cover_for(game.game_id)
+            if cover:
+                covers[game.game_id] = cover
+        return covers
+
+    def _covers_for_snapshot(
+        self, pending: Sequence[tuple[Game, WindowSnapshot]]
+    ) -> dict[str, str]:
+        """窗口快照版本的配图收集（类型与提醒路径一致，只是片段不同）。"""
         covers: dict[str, str] = {}
         for game, _ in pending:
             cover = self.cover_for(game.game_id)
@@ -529,7 +567,7 @@ class ActivityPollingService:
                         )
                         report.fetched_games += 1
                         report.activities += len(fetched[game_id])
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         detail = f"{type(exc).__name__}: {exc}"
                         report.failures[game_id] = detail
                         logger.warning(
@@ -598,7 +636,7 @@ class ActivityPollingService:
         for game in games:
             try:
                 activities = await self.fetch_activities(game.game_id, force=force)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"订阅 {game.name} 时获取活动失败: {exc}")
                 await self.delivery.push_text(
                     session_key,

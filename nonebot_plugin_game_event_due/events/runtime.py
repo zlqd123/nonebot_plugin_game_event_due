@@ -13,7 +13,7 @@ from nonebot import logger
 from ..config import Config, DailyPushConfig, DeadlinePushConfig, StartPushConfig
 from ..core.storage import store
 from .delivery import Delivery
-from .polling import ActivityPollingService, PollingSettings
+from .polling import ActivityPollingService, DailyCheckSettings, PollingSettings
 from .services.message_formatter import (
     MessageSettings,
     normalize_game_aliases,
@@ -44,7 +44,7 @@ def resolve_cache_dir(config: Config) -> Path | None:
         path = Path(localstore.get_plugin_cache_dir())
         path.mkdir(parents=True, exist_ok=True)
         return path
-    except Exception:  # noqa: BLE001 - 没装 localstore 就用包内目录
+    except Exception:
         path = Path(__file__).resolve().parent.parent / ".cache"
         try:
             path.mkdir(parents=True, exist_ok=True)
@@ -137,6 +137,12 @@ class EventsRuntime:
                 notify_on_subscribe=config.notify_on_subscribe,
                 retention_days=config.state_retention_days,
                 quiet_hours=config.quiet_hours,
+                window_hours=config.window_hours,
+                daily_check=DailyCheckSettings(
+                    hour=config.daily_push.hour,
+                    minute=config.daily_push.minute,
+                    second=config.check_second,
+                ),
             ),
             self.policy,
             self.message_settings,
