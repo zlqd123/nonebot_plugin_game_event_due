@@ -308,12 +308,6 @@ class ActivityPollingService:
             self.last_report = report
             return report
 
-        if in_quiet_hours(real_now, self.settings.quiet_hours):
-            logger.info("静默时段跳过窗口快照推送")
-            report.finished_at = datetime.now(GAME_TIMEZONE)
-            self.last_report = report
-            return report
-
         pushed_dates = await self.subscriptions.get_daily_state()
 
         for umo, session in active_sessions.items():
@@ -349,6 +343,10 @@ class ActivityPollingService:
                     pending.append((game, snapshot))
 
             if not pending:
+                logger.info(
+                    f"{umo} 本轮窗口为空"
+                    f"（{now:%m-%d %H:%M:%S}，±{self.settings.window_hours}h），不推送"
+                )
                 continue
 
             parts = build_multi_game_snapshot_parts(
